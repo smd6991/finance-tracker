@@ -1,0 +1,69 @@
+<!doctype html>
+ <html lang="en">
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+ <meta name="theme-color" content="#0f766e">
+ <meta name="description" content="Offline-first personal finance tracker for income, expenses, accounts, credit cards, and investments.">
+ <link rel="manifest" href="manifest.webmanifest">
+ <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+ <link rel="apple-touch-icon" href="icons/icon-192.png">
+ <link rel="stylesheet" href="styles.css">
+ <title>Offline Finance Tracker</title>
+ </head>
+ <body>
+ <div id="app" class="app-shell">
+ <header class="topbar">
+ <div>
+ <p class="eyebrow">Offline finance app + Google sync</p>
+ <h1>My Finance Tracker</h1>
+ </div>
+ <div class="top-actions">
+ <button id="installBtn" class="ghost small" hidden>Install</button>
+ <button id="syncNowTopBtn" class="ghost small">Sync</button>
+ <button id="backupBtn" class="ghost small">Backup</button>
+ </div>
+ </header>
+
+ <main id="main" class="main-content" aria-live="polite"></main>
+
+ <nav class="bottom-nav" aria-label="Main navigation">
+ <button data-view="entry" class="nav-item active"><span>Enter</span></button>
+ <button data-view="home" class="nav-item"><span>Home</span></button>
+ <button data-view="accounts" class="nav-item"><span>Accounts</span></button>
+ <button data-view="reports" class="nav-item"><span>Dashboard</span></button>
+ <button data-view="records" class="nav-item"><span>Records</span></button>
+ <button data-view="manage" class="nav-item"><span>Setup</span></button>
+ </nav>
+ </div>
+
+ <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+ <dialog id="backupDialog" class="modal">
+ <form method="dialog">
+ <div class="modal-head">
+ <h2>Backup and restore</h2>
+ <button class="icon-btn" value="cancel" aria-label="Close">x</button>
+ </div>
+ <p class="muted">Your live data is stored locally in this browser. In v8.61, you can sync to your own Google Sheet, use Go Live Date for historical data, manage master data, personalize favorite reports/descriptions, and drag dashboard widgets/report pills into your preferred order. Export JSON for exact backup, or Excel for reporting and migration.</p>
+ <div class="stack gap">
+ <button id="exportJsonBtn" type="button" class="primary">Export full backup JSON</button>
+ <button id="exportExcelBtn" type="button" class="secondary">Export Excel workbook</button>
+ <button id="exportCsvBtn" type="button" class="secondary">Export transactions CSV</button>
+ <label class="file-card">
+ <span>Import backup JSON</span>
+ <input id="importJsonInput" type="file" accept="application/json,.json">
+ </label>
+ <label class="file-card">
+ <span>Import Excel workbook</span>
+ <input id="importExcelInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+ </label>
+ <p class="muted tiny">Excel import supports this app's exports and legacy workbooks that have a Records sheet with Date, Amount, Category/Subcategory, Source, and investment columns.</p>
+ <button id="resetDataBtn" type="button" class="danger">Reset all local data</button>
+ </div>
+ </form>
+ </dialog>
+
+ <script src="app.js" defer></script>
+ </body>
+ </html>

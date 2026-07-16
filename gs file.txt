@@ -1,0 +1,245 @@
+/**
+• @OnlyCurrentDoc
+• Offline Finance Tracker v8.3 - Google Sheets sync backend
+• Setup:
+A. Create a Google Sheet.
+B. Open Extensions > Apps Script.
+C. Paste this file as Code.gs.
+D. Change SYNC_SECRET to a private long key.
+E. Run setupFinanceTrackerSheets() once and authorize it.
+F. Deploy > New deployment > Web app.
+◦ Execute as: Me
+◦ Who has access: Anyone
+• Security notes:
+◦ @OnlyCurrentDoc limits this script to the bound finance Google Sheet.
+◦ Keep SPREADSHEET_ID blank; this v8.3 backend uses only the current bound spreadsheet.
+A. Paste the Web App URL and the same SYNC_SECRET into the v8.3 app Setup > Google sync.
+*/
+
+const SYNC_SECRET = 'CHANGE_ME_TO_A_LONG_PRIVATE_SYNC_KEY';
+const SPREADSHEET_ID = ''; // v8: keep blank. The backend intentionally uses only the current bound Google Sheet.
+
+const SHEET_CONFIG = {
+transactions: {
+name: 'Transactions',
+headers: ['id','date','type','amount','categoryId','fromAccountId','toAccountId','investmentType','assetId','maturityDate','notes','createdAt','updatedAt','isDeleted','deletedAt','deviceId']
+},
+accounts: {
+name: 'Accounts',
+headers: ['id','name','accountType','openingBalance','notes','createdAt','updatedAt','isDeleted','deletedAt','deviceId']
+},
+categories: {
+name: 'Categories',
+headers: ['id','name','transactionType','includeInReports','monthlyBudget','createdAt','updatedAt','isDeleted','deletedAt','deviceId']
+},
+assets: {
+name: 'Assets',
+headers: ['id','name','investmentType','openingAmount','currentValue','maturityDate','fdBankAccountId','fdAccountNumber','fdPrincipal','fdMaturityAmount','fdInterestAmount','notes','createdAt','updatedAt','isDeleted','deletedAt','deviceId']
+},
+settings: {
+name: 'Settings',
+headers: ['id','currency','theme','firstDayOfMonth','trackingStartMonth','createdAt','updatedAt','isDeleted','deletedAt','deviceId','goLiveDate','excludedAverageMonths','defaultExpenseCategoryId','defaultIncomeCategoryId','defaultInvestmentCategoryId','defaultSavingsAccountId','defaultCashAccountId','defaultCreditCardAccountId','defaultCompanyAccountId','defaultMutualFundAssetId','defaultStockAssetId','defaultFdAssetId','defaultOtherInvestmentAssetId','favoriteReportIds','reportDescriptions','dashboardWidgetOrder','reportGroupOrder','reportPillOrder','inactiveAccountIds','inactiveCategoryIds','inactiveAssetIds']
+}
+};
+
+function setupFinanceTrackerSheets() {
+const ss = getSpreadsheet_();
+Object.keys(SHEET_CONFIG).forEach(function(key) {
+ensureSheet_(ss, SHEET_CONFIG[key].name, SHEET_CONFIG[key].headers);
+});
+ensureSheet_(ss, 'Sync_Log', ['timestamp','action','deviceId','deviceName','rows','status','message']);
+return {
+ok: true,
+spreadsheetId: ss.getId(),
+spreadsheetName: ss.getName(),
+spreadsheetUrl: ss.getUrl()
+};
+}
+
+function doPost(e) {
+try {
+const payload = JSON.parse((e.postData && e.postData.contents) || '{}');
+return json_(handleClientRequest(payload));
+} catch (err) {
+return json_({ ok: false, error: String(err && err.message ? err.message : err) });
+}
+}
+
+function doGet(e) {
+try {
+const params = e && e.parameter ? e.parameter : {};
+const payload = params.payload ? JSON.parse(params.payload) : { action: params.action || 'health', secret: params.secret };
+const result = handleClientRequest(payload);
+if (params.callback) {
+return ContentService
+.createTextOutput(String(params.callback) + '(' + JSON.stringify(result) + ');')
+.setMimeType(ContentService.MimeType.JAVASCRIPT);
+}
+return json_(result);
+} catch (err) {
+return json_({ ok: false, error: String(err && err.message ? err.message : err) });
+}
+}
+
+function handleClientRequest(payload) {
+payload = payload || {};
+if (!SYNC_SECRET || SYNC_SECRET === 'CHANGE_ME_TO_A_LONG_PRIVATE_SYNC_KEY') {
+throw new Error('Backend SYNC_SECRET has not been changed in Code.gs.');
+}
+if (String(payload.secret || '') !== String(SYNC_SECRET)) {
+throw new Error('Invalid sync key.');
+}
+const ss = getSpreadsheet_();
+setupFinanceTrackerSheets();
+
+if (payload.action === 'health') {
+log_(ss, payload, 0, 'ok', 'Health check');
+return { ok: true, spreadsheetId: ss.getId(), spreadsheetName: ss.getName(), serverTime: new Date().toISOString() };
+}
+
+if (payload.action === 'pull') {
+const data = readAllData_(ss);
+const rows = Object.keys(data).reduce(function(total, key) { return total + data[key].length; }, 0);
+log_(ss, payload, rows, 'ok', 'Pull complete');
+return { ok: true, data: data, serverTime: new Date().toISOString() };
+}
+
+if (payload.action === 'push') {
+const count = writeAllData_(ss, payload.data || {});
+log_(ss, payload, count, 'ok', 'Push complete');
+return { ok: true, pushed: count, serverTime: new Date().toISOString() };
+}
+
+throw new Error('Unknown action: ' + payload.action);
+}
+
+function getSpreadsheet_() {
+if (SPREADSHEET_ID) {
+throw new Error('SPREADSHEET_ID must stay blank in v8. Open this script from the finance Google Sheet so @OnlyCurrentDoc can restrict access to only that file.');
+}
+const ss = SpreadsheetApp.getActiveSpreadsheet();
+if (!ss) throw new Error('No active spreadsheet. Open this script from Extensions > Apps Script inside the finance Google Sheet.');
+return ss;
+}
+
+function ensureSheet_(ss, name, headers) {
+let sheet = ss.getSheetByName(name);
+if (!sheet) sheet = ss.insertSheet(name);
+const current = sheet.getRange(1, 1, 1, Math.max(headers.length, sheet.getLastColumn() || 1)).getValues()[0];
+const needsHeader = headers.some(function(header, index) { return current[index] !== header; });
+if (needsHeader) {
+sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+sheet.setFrozenRows(1);
+}
+return sheet;
+}
+
+function readAllData_(ss) {
+const out = {};
+Object.keys(SHEET_CONFIG).forEach(function(key) {
+const config = SHEET_CONFIG[key];
+const sheet = ensureSheet_(ss, config.name, config.headers);
+out[key] = readSheetObjects_(sheet, config.headers);
+});
+return out;
+}
+
+function writeAllData_(ss, data) {
+let total = 0;
+Object.keys(SHEET_CONFIG).forEach(function(key) {
+const rows = data[key] || [];
+if (!rows.length) return;
+const config = SHEET_CONFIG[key];
+const sheet = ensureSheet_(ss, config.name, config.headers);
+total += upsertRows_(sheet, config.headers, rows);
+});
+return total;
+}
+
+function readSheetObjects_(sheet, headers) {
+const lastRow = sheet.getLastRow();
+if (lastRow < 2) return [];
+const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+return values
+.filter(function(row) { return row.some(function(value) { return value !== '' && value !== null; }); })
+.map(function(row) {
+const obj = {};
+headers.forEach(function(header, index) { obj[header] = normalizeCell_(row[index], header); });
+return obj;
+})
+.filter(function(obj) { return obj.id; });
+}
+
+function upsertRows_(sheet, headers, incomingRows) {
+const existing = readSheetObjects_(sheet, headers);
+const rowById = {};
+existing.forEach(function(row, index) { rowById[String(row.id)] = { row: row, rowNumber: index + 2 }; });
+let written = 0;
+
+incomingRows.forEach(function(raw) {
+if (!raw || !raw.id) return;
+const record = sanitizeRecord_(raw, headers);
+const current = rowById[String(record.id)];
+if (current && timestamp_(current.row.updatedAt || current.row.deletedAt) > timestamp_(record.updatedAt || record.deletedAt)) {
+return;
+}
+const values = headers.map(function(header) { return record[header] === undefined ? '' : record[header]; });
+if (current) {
+sheet.getRange(current.rowNumber, 1, 1, headers.length).setValues([values]);
+} else {
+sheet.appendRow(values);
+}
+written += 1;
+});
+return written;
+}
+
+function sanitizeRecord_(raw, headers) {
+const now = new Date().toISOString();
+const record = {};
+headers.forEach(function(header) {
+record[header] = raw[header] === undefined || raw[header] === null ? '' : raw[header];
+});
+record.id = String(record.id || '').trim();
+record.createdAt = record.createdAt || record.updatedAt || now;
+record.updatedAt = record.updatedAt || now;
+record.isDeleted = toBool_(record.isDeleted || record.deletedAt);
+record.deletedAt = record.deletedAt || '';
+return record;
+}
+
+function normalizeCell_(value, header) {
+if (Object.prototype.toString.call(value) === '[object Date]') {
+if (header === 'date' || header === 'maturityDate') {
+return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+return value.toISOString();
+}
+return value;
+}
+
+function timestamp_(value) {
+const time = Date.parse(value || '');
+return isNaN(time) ? 0 : time;
+}
+
+function toBool_(value) {
+return value === true || value === 'TRUE' || value === 'true' || value === 1 || value === '1';
+}
+
+function log_(ss, payload, rows, status, message) {
+try {
+const sheet = ensureSheet_(ss, 'Sync_Log', ['timestamp','action','deviceId','deviceName','rows','status','message']);
+sheet.appendRow([new Date().toISOString(), payload.action || '', payload.deviceId || '', payload.deviceName || '', rows || 0, status || '', message || '']);
+const maxRows = 501;
+if (sheet.getLastRow() > maxRows) sheet.deleteRows(2, sheet.getLastRow() - maxRows);
+} catch (err) {
+// Logging should never block sync.
+}
+}
+
+function json_(object) {
+return ContentService
+.createTextOutput(JSON.stringify(object))
+.setMimeType(ContentService.MimeType.JSON);
+}
