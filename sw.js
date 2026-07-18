@@ -1,4 +1,4 @@
-const CACHE_NAME = 'offline-finance-tracker-v8-61-excel-export-fix';
+const CACHE_NAME = 'offline-finance-tracker-v8-62-sync-issue-fix';
 const APP_SHELL = [
   './',
   './index.html',
