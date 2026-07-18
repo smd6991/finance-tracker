@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.8.61';
+  const VERSION = '1.8.62-dedup';
   const DB_NAME = 'offline-finance-tracker';
   const DB_VERSION = 1;
   const MIN_REPORT_MONTH = '2025-07';
@@ -211,6 +211,8 @@
     await ensureDefaultMasterItems();
     await loadAll();
     await ensureDeviceSettings();
+    await loadAll();
+    await consolidateDuplicateMasterData();
     await loadAll();
     bindGlobalEvents();
     registerServiceWorker();
@@ -5112,26 +5114,258 @@
     }
   }
 
+
+  function createEmptyAliasMaps() {
+    return { accounts: new Map(), categories: new Map(), assets: new Map() };
+  }
+
+  function naturalKeyMapForStore(storeName, rows = []) {
+    const map = new Map();
+    for (const row of rows) {
+      if (!row || row.isDeleted || row.deletedAt) continue;
+      const key = masterNaturalKey(storeName, row);
+      if (!key) continue;
+      const existing = map.get(key);
+      map.set(key, existing ? choosePreferredMasterRow(storeName, [existing, row], []) : row);
+    }
+    return map;
+  }
+
+  function masterNaturalKey(storeName, row = {}) {
+    if (!row) return '';
+    if (storeName === 'accounts') {
+      const name = norm(row.name);
+      const type = normalizeAccountType(row.accountType) || row.accountType || '';
+      return name ? `${norm(type)}::${name}` : '';
+    }
+    if (storeName === 'categories') {
+      const name = norm(row.name);
+      const type = normalizeTransactionType(row.transactionType) || row.transactionType || '';
+      return name ? `${norm(type)}::${name}` : '';
+    }
+    if (storeName === 'assets') {
+      const name = norm(row.name);
+      const type = assetInvestmentType(row) || row.investmentType || '';
+      return name ? `${norm(type)}::${name}` : '';
+    }
+    return '';
+  }
+
+  function mergeMasterRows(storeName, base = {}, incoming = {}) {
+    const merged = { ...base };
+    const copyIfFilled = keys => {
+      for (const key of keys) {
+        const current = merged[key];
+        const value = incoming[key];
+        const currentEmpty = current === undefined || current === null || current === '' || current === 0 || current === '0';
+        const valueFilled = !(value === undefined || value === null || value === '' || value === 0 || value === '0');
+        if (currentEmpty && valueFilled) merged[key] = value;
+      }
+    };
+    if (storeName === 'accounts') copyIfFilled(['name', 'accountType', 'openingBalance', 'creditLimit', 'notes', 'comments']);
+    if (storeName === 'categories') copyIfFilled(['name', 'transactionType', 'monthlyBudget', 'notes', 'comments']);
+    if (storeName === 'assets') copyIfFilled(['name', 'investmentType', 'openingAmount', 'currentValue', 'maturityDate', 'fdBankAccountId', 'fdAccountNumber', 'fdPrincipal', 'fdMaturityAmount', 'fdInterestAmount', 'notes', 'comments']);
+    if (incoming.includeInReports === false || incoming.includeInReports === true) merged.includeInReports = incoming.includeInReports;
+    merged.createdAt = merged.createdAt || incoming.createdAt;
+    merged.updatedAt = newerTimestamp(merged.updatedAt, incoming.updatedAt);
+    merged.deletedAt = '';
+    merged.isDeleted = false;
+    return storeName === 'assets' ? normalizeAssetRecord(merged) : merged;
+  }
+
+  function newerTimestamp(a, b) {
+    return timeValue(b) > timeValue(a) ? b : a;
+  }
+
+  function choosePreferredMasterRow(storeName, rows = [], transactions = [], settings = state.data.settings || {}) {
+    const scores = new Map();
+    for (const row of rows) scores.set(String(row.id), masterRowScore(storeName, row, transactions, settings));
+    return [...rows].sort((a, b) => (scores.get(String(b.id)) || 0) - (scores.get(String(a.id)) || 0) || timeValue(b.updatedAt || b.createdAt) - timeValue(a.updatedAt || a.createdAt))[0];
+  }
+
+  function masterRowScore(storeName, row = {}, transactions = [], settings = state.data.settings || {}) {
+    const id = String(row.id || '');
+    let score = 0;
+    for (const t of transactions) {
+      if (storeName === 'accounts' && (String(t.fromAccountId || '') === id || String(t.toAccountId || '') === id)) score += 100;
+      if (storeName === 'categories' && String(t.categoryId || '') === id) score += 100;
+      if (storeName === 'assets' && String(t.assetId || '') === id) score += 100;
+    }
+    for (const value of Object.values(settings || {})) {
+      if (String(value || '') === id) score += 50;
+    }
+    if (storeName === 'accounts') score += Math.abs(num(row.openingBalance)) ? 25 : 0;
+    if (storeName === 'categories') score += num(row.monthlyBudget) ? 25 : 0;
+    if (storeName === 'assets') score += (num(row.currentValue) || num(row.openingAmount) || num(row.fdPrincipal) || num(row.fdMaturityAmount)) ? 25 : 0;
+    if (row.notes || row.comments) score += 5;
+    if (row.syncPending) score += 2;
+    return score;
+  }
+
+  async function consolidateDuplicateMasterData() {
+    const [transactions, accounts, categories, assets, settingsRows] = await Promise.all([
+      getAll('transactions'), getAll('accounts'), getAll('categories'), getAll('assets'), getAll('settings')
+    ]);
+    const settings = settingsRows.find(s => s.id === 'default') || state.data.settings || DEFAULT_SETTINGS;
+    const aliasMaps = createEmptyAliasMaps();
+    let changed = 0;
+    changed += await consolidateMasterStore('accounts', accounts, transactions, settings, aliasMaps.accounts);
+    changed += await consolidateMasterStore('categories', categories, transactions, settings, aliasMaps.categories);
+    changed += await consolidateMasterStore('assets', assets.map(normalizeAssetRecord), transactions, settings, aliasMaps.assets);
+    changed += await rewriteLocalReferencesForAliases(aliasMaps);
+    return changed;
+  }
+
+  async function consolidateMasterStore(storeName, rows = [], transactions = [], settings = {}, aliasMap = new Map()) {
+    const groups = new Map();
+    for (const row of rows.filter(notDeleted)) {
+      const key = masterNaturalKey(storeName, row);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    let changed = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const canonical = choosePreferredMasterRow(storeName, group, transactions, settings);
+      let merged = canonical;
+      for (const row of group) {
+        if (String(row.id) === String(canonical.id)) continue;
+        aliasMap.set(String(row.id), String(canonical.id));
+        merged = mergeMasterRows(storeName, merged, row);
+        await put(storeName, markDeleted(row));
+        changed += 1;
+      }
+      await put(storeName, withLocalChange({ ...merged, id: canonical.id, isDeleted: false, deletedAt: '' }));
+      changed += 1;
+    }
+    return changed;
+  }
+
+  async function rewriteLocalReferencesForAliases(aliasMaps) {
+    let changed = 0;
+    const transactions = await getAll('transactions');
+    for (const transaction of transactions) {
+      const rewritten = applyMasterIdAliasesToTransaction(transaction, aliasMaps);
+      if (rewritten.fromAccountId !== transaction.fromAccountId || rewritten.toAccountId !== transaction.toAccountId || rewritten.categoryId !== transaction.categoryId || rewritten.assetId !== transaction.assetId) {
+        await put('transactions', withLocalChange({ ...transaction, ...rewritten }));
+        changed += 1;
+      }
+    }
+    const settingsRows = await getAll('settings');
+    const settings = settingsRows.find(s => s.id === 'default');
+    if (settings) {
+      const rewrittenSettings = applyMasterIdAliasesToSettings(settings, aliasMaps);
+      if (JSON.stringify(settings) !== JSON.stringify(rewrittenSettings)) {
+        await put('settings', withLocalChange({ ...settings, ...rewrittenSettings, id: 'default' }));
+        changed += 1;
+      }
+    }
+    return changed;
+  }
+
+  function applyMasterIdAliasesToTransaction(transaction = {}, aliasMaps = createEmptyAliasMaps()) {
+    const out = { ...transaction };
+    out.fromAccountId = aliasMaps.accounts.get(String(out.fromAccountId || '')) || out.fromAccountId || '';
+    out.toAccountId = aliasMaps.accounts.get(String(out.toAccountId || '')) || out.toAccountId || '';
+    out.categoryId = aliasMaps.categories.get(String(out.categoryId || '')) || out.categoryId || '';
+    out.assetId = aliasMaps.assets.get(String(out.assetId || '')) || out.assetId || '';
+    return out;
+  }
+
+  function applyMasterIdAliasesToSettings(settings = {}, aliasMaps = createEmptyAliasMaps()) {
+    const out = { ...settings };
+    const replace = (map, value) => map.get(String(value || '')) || value || '';
+    out.defaultSavingsAccountId = replace(aliasMaps.accounts, out.defaultSavingsAccountId);
+    out.defaultCashAccountId = replace(aliasMaps.accounts, out.defaultCashAccountId);
+    out.defaultCreditCardAccountId = replace(aliasMaps.accounts, out.defaultCreditCardAccountId);
+    out.defaultCompanyAccountId = replace(aliasMaps.accounts, out.defaultCompanyAccountId);
+    out.defaultExpenseCategoryId = replace(aliasMaps.categories, out.defaultExpenseCategoryId);
+    out.defaultIncomeCategoryId = replace(aliasMaps.categories, out.defaultIncomeCategoryId);
+    out.defaultInvestmentCategoryId = replace(aliasMaps.categories, out.defaultInvestmentCategoryId);
+    out.defaultMutualFundAssetId = replace(aliasMaps.assets, out.defaultMutualFundAssetId);
+    out.defaultStockAssetId = replace(aliasMaps.assets, out.defaultStockAssetId);
+    out.defaultFdAssetId = replace(aliasMaps.assets, out.defaultFdAssetId);
+    out.defaultOtherInvestmentAssetId = replace(aliasMaps.assets, out.defaultOtherInvestmentAssetId);
+    out.inactiveAccountIds = replaceIdList(out.inactiveAccountIds, aliasMaps.accounts);
+    out.inactiveCategoryIds = replaceIdList(out.inactiveCategoryIds, aliasMaps.categories);
+    out.inactiveAssetIds = replaceIdList(out.inactiveAssetIds, aliasMaps.assets);
+    return out;
+  }
+
+  function replaceIdList(value = '', map = new Map()) {
+    const next = [];
+    for (const raw of String(value || '').split(',').map(x => x.trim()).filter(Boolean)) {
+      const replacement = map.get(String(raw)) || raw;
+      if (replacement && !next.includes(replacement)) next.push(replacement);
+    }
+    return next.join(',');
+  }
+
   async function mergeRemoteData(data) {
+    const aliasMaps = createEmptyAliasMaps();
     let count = 0;
-    count += await mergeRemoteStore('transactions', data.transactions || []);
-    count += await mergeRemoteStore('accounts', data.accounts || []);
-    count += await mergeRemoteStore('categories', data.categories || []);
-    count += await mergeRemoteStore('assets', data.assets || []);
-    if ((data.settings || []).length) count += await mergeRemoteSettings(data.settings[0]);
+
+    // Merge master data first so transactions pulled from Google can be pointed
+    // at the already-existing local master rows instead of creating duplicate
+    // categories/accounts/assets with different IDs.
+    count += await mergeRemoteStore('accounts', data.accounts || [], aliasMaps);
+    count += await mergeRemoteStore('categories', data.categories || [], aliasMaps);
+    count += await mergeRemoteStore('assets', data.assets || [], aliasMaps);
+
+    const incomingTransactions = (data.transactions || [])
+      .map(row => applyMasterIdAliasesToTransaction(row, aliasMaps));
+    count += await mergeRemoteStore('transactions', incomingTransactions, aliasMaps);
+
+    if ((data.settings || []).length) count += await mergeRemoteSettings(applyMasterIdAliasesToSettings(data.settings[0], aliasMaps));
+    count += await consolidateDuplicateMasterData();
     await loadAll();
     return count;
   }
 
-  async function mergeRemoteStore(storeName, rows) {
+  async function mergeRemoteStore(storeName, rows, aliasMaps = createEmptyAliasMaps()) {
     if (!rows.length) return 0;
     const local = await getAll(storeName);
     const byId = new Map(local.map(row => [String(row.id), row]));
+    const isMasterStore = ['accounts', 'categories', 'assets'].includes(storeName);
+    const byNaturalKey = isMasterStore ? naturalKeyMapForStore(storeName, local) : new Map();
     let count = 0;
+
     for (const raw of rows) {
       if (!raw || !raw.id) continue;
       const incoming = withRemoteChange(normalizeRemoteRow(storeName, raw));
-      const existing = byId.get(String(incoming.id));
+      const incomingId = String(incoming.id);
+
+      if (isMasterStore) {
+        const key = masterNaturalKey(storeName, incoming);
+        const sameKeyLocal = key ? byNaturalKey.get(key) : null;
+        const sameIdLocal = byId.get(incomingId);
+
+        // If Google has the same visible master value under a different ID,
+        // keep the local/canonical ID and remember the remote ID as an alias.
+        // This prevents duplicated dropdown categories after first phone sync.
+        if (sameKeyLocal && String(sameKeyLocal.id) !== incomingId) {
+          aliasMaps[storeName].set(incomingId, String(sameKeyLocal.id));
+          if (!incoming.isDeleted && remoteIsNewer(incoming, sameKeyLocal)) {
+            const merged = mergeMasterRows(storeName, sameKeyLocal, incoming);
+            await put(storeName, { ...merged, id: sameKeyLocal.id, syncPending: false });
+            byId.set(String(sameKeyLocal.id), { ...merged, id: sameKeyLocal.id });
+            byNaturalKey.set(key, { ...merged, id: sameKeyLocal.id });
+            count += 1;
+          }
+          continue;
+        }
+
+        if (!sameIdLocal || remoteIsNewer(incoming, sameIdLocal)) {
+          await put(storeName, incoming);
+          byId.set(incomingId, incoming);
+          if (key) byNaturalKey.set(key, incoming);
+          count += 1;
+        }
+        continue;
+      }
+
+      const existing = byId.get(incomingId);
       if (!existing || remoteIsNewer(incoming, existing)) {
         await put(storeName, incoming);
         count += 1;
