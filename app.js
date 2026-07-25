@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.8.62-dedup';
+  const VERSION = '1.8.64-records-drilldown-mobile';
   const DB_NAME = 'offline-finance-tracker';
   const DB_VERSION = 1;
   const MIN_REPORT_MONTH = '2025-07';
@@ -190,7 +190,7 @@
     selectedReportCategory: 'overview',
     setupSection: 'start',
     setupQuickAdd: '',
-    recordFilter: { month: currentMonthKey(), type: 'All', search: '', sort: 'dateDesc' },
+    recordFilter: { month: currentMonthKey(), type: 'All', subfilter: 'All', search: '', sort: 'dateDesc' },
     data: {
       transactions: [],
       accounts: [],
@@ -414,6 +414,7 @@
     });
     document.getElementById('exportJsonBtn').addEventListener('click', exportJson);
     document.getElementById('exportExcelBtn').addEventListener('click', exportExcel);
+    document.getElementById('downloadTemplateDialogBtn')?.addEventListener('click', exportImportTemplate);
     document.getElementById('exportCsvBtn').addEventListener('click', exportCsv);
     document.getElementById('importJsonInput').addEventListener('change', importJson);
     document.getElementById('importExcelInput').addEventListener('change', importExcel);
@@ -950,21 +951,61 @@
           `).join('')}
         </div>
       </div>
-      <div class="card">
-        <h2>Investment assets</h2>
-        <div class="table-wrap">
+      ${renderAccountsInvestmentAssetsSection()}
+    `;
+  }
+
+  function renderAccountsInvestmentAssetsSection() {
+    const rows = investmentRows();
+    const typeOrder = ['Fixed Deposits', 'Stocks', 'Mutual Funds', 'Other Investments'];
+    const rowsForType = type => rows.filter(row => type === 'Fixed Deposits' ? isFixedDepositAsset(row.asset) : assetInvestmentType(row.asset) === type);
+    return `
+      <div class="card investment-assets-card">
+        <div class="card-title-row">
+          <div>
+            <h2>Investments</h2>
+            <p class="muted">Investments are split by type for easier review. FD rows include Linked Bank and FD details.</p>
+          </div>
+        </div>
+        <div class="stack gap">
+          ${typeOrder.map(type => renderAccountsInvestmentTypeSection(type, rowsForType(type))).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAccountsInvestmentTypeSection(type, rows) {
+    const isFdType = type === 'Fixed Deposits';
+    return `
+      <div class="subcard investment-type-section">
+        <div class="card-title-row compact-title-row">
+          <div>
+            <h3>${escapeHtml(type)}</h3>
+            <p class="muted tiny">${rows.length} ${rows.length === 1 ? 'asset' : 'assets'}</p>
+          </div>
+          <span class="pill">${money(sum(rows.map(row => investmentDisplayValue(row))))}</span>
+        </div>
+        <div class="table-wrap compact-table">
           <table>
-            <thead><tr><th>Type</th><th>Asset</th><th class="right">Invested</th><th class="right">Manual value</th><th>FD details</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Asset</th>
+                ${isFdType ? '<th>Linked Bank</th><th>FD details</th>' : ''}
+                <th class="right">Invested</th>
+                <th class="right">Estimated value</th>
+                <th>Comments</th>
+              </tr>
+            </thead>
             <tbody>
-              ${investmentRows().map(row => `
+              ${rows.length ? rows.map(row => `
                 <tr>
-                  <td>${escapeHtml(assetInvestmentType(row.asset))}</td>
                   <td>${escapeHtml(row.asset.name)}</td>
+                  ${isFdType ? `<td>${escapeHtml(fdBankName(row.asset))}</td><td>${escapeHtml(fdDetailsText(row.asset))}</td>` : ''}
                   <td class="right amount investment">${money(row.invested)}</td>
-                  <td class="right">${row.asset.currentValue ? money(num(row.asset.currentValue)) : '<span class="muted">-</span>'}</td>
-                  <td>${isFixedDepositAsset(row.asset) ? escapeHtml(fdDetailsText(row.asset)) : '<span class="muted">-</span>'}</td>
+                  <td class="right amount investment">${money(investmentDisplayValue(row))}</td>
+                  <td>${row.asset.notes ? escapeHtml(row.asset.notes) : '<span class="muted">-</span>'}</td>
                 </tr>
-              `).join('')}
+              `).join('') : `<tr><td colspan="${isFdType ? 6 : 4}">${empty(`No ${type.toLowerCase()} found.`)}</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -1065,7 +1106,7 @@
           </div>
         `}
       </div>
-      ${isEmptyFavorites ? '' : renderReportBody(report, month)}
+      ${isEmptyFavorites ? '' : `${reportDrilldownCard(report, month)}${renderReportBody(report, month)}`}
     `;
   }
 
@@ -1097,6 +1138,13 @@
     document.getElementById('resetReportDescriptionBtn')?.addEventListener('click', async () => {
       await resetReportDescription(state.selectedReport || 'dashboard');
     });
+    document.querySelectorAll('[data-drill-records]').forEach(button => button.addEventListener('click', () => {
+      setRecordsView({
+        month: button.dataset.drillMonth || state.selectedMonth || 'All',
+        type: button.dataset.drillType || 'All',
+        subfilter: button.dataset.drillSubfilter || 'All'
+      });
+    }));
     bindReportPillOrdering();
     bindDashboardWidgetOrdering();
   }
@@ -1583,7 +1631,7 @@
         <p class="muted tiny">Use Setup to enter investments already held as of your go-live date. Historical transactions before go live still appear as monthly activity, but are not added to total invested/live inventory. Maturity date is optional for mutual funds and stocks. For FDs, enter principal plus either maturity amount or interest amount; the other value auto-fills.</p>
         ${tableHtml(tableHeaders, tableRows, `No ${investmentType.toLowerCase()} assets found.`)}
       </div>
-      <div class="card"><h2>${escapeHtml(investmentType)} allocation</h2>${rows.length ? barList(rows, r => r.asset.name, r => investmentDisplayValue({ asset: r.asset, invested: r.totalInvested, currentValue: r.currentValue })) : empty('No investment assets found.')}</div>
+      <div class="card"><h2>${escapeHtml(investmentType)} allocation</h2>${rows.length ? barList(rows, r => r.asset.name, r => investmentDisplayValue({ asset: r.asset, invested: r.totalInvested, currentValue: r.currentValue })) : empty('No investments found.')}</div>
       ${isFd ? renderFdAllocationByBank(rows) : ''}
       <div class="card"><h2>Investment entries</h2>${transactionTable(txns.slice(0, 25), 'No investment entries for this period.')}</div>
     `;
@@ -1817,7 +1865,7 @@
         <div class="card"><h2>Investment allocation</h2>${rows.some(r => r.total > 0) ? barList(rows.filter(r => r.total > 0), r => r.type, r => r.total) : empty('No invested amounts yet.')}</div>
         <div class="card"><h2>Investment value by type</h2>${rows.some(r => r.value > 0) ? barList(rows.filter(r => r.value > 0), r => r.type, r => r.value) : empty('No investment values yet.')}</div>
       </div>
-      <div class="card"><h2>Investment overview table</h2>${tableHtml(['Type','Assets','Opening','Period invested','Total invested','Estimated value','Gain/Loss','Return %'], tableRows, 'No investment assets found.')}</div>
+      <div class="card"><h2>Investment overview table</h2>${tableHtml(['Type','Assets','Opening','Period invested','Total invested','Estimated value','Gain/Loss','Return %'], tableRows, 'No investments found.')}</div>
     `;
   }
 
@@ -1888,7 +1936,7 @@
       <div class="card"><h2>Historical data rule</h2><p class="muted">${escapeHtml(historicalSummaryText())}</p></div>
       <div class="grid two">
         <div class="card"><h2>Opening account balances</h2>${tableHtml(['Type','Account','Opening balance','Comments'], accountRows, 'No accounts found.')}</div>
-        <div class="card"><h2>Opening investment assets</h2>${tableHtml(['Type','Asset','Opening invested','Manual current value','Date','FD linked bank','FD account no.','FD maturity amount','Comments'], assetRows, 'No investment assets found.')}</div>
+        <div class="card"><h2>Opening investments</h2>${tableHtml(['Type','Asset','Opening invested','Manual current value','Date','FD linked bank','FD account no.','FD maturity amount','Comments'], assetRows, 'No investments found.')}</div>
       </div>
     `;
   }
@@ -2310,25 +2358,36 @@
   }
 
   function renderRecords() {
+    const filter = state.recordFilter;
+    const subOptions = recordSubFilterOptions(filter.type);
+    if (!subOptions.some(option => option.value === filter.subfilter)) filter.subfilter = 'All';
     const records = filteredRecords();
+    const typeOptions = ['All', ...TRANSACTION_TYPES.map(t => t.id)];
     return `
       <div class="card">
         <div class="card-title-row">
           <div>
             <h2>Records</h2>
-            <p class="muted">Search, edit, delete, and export your transaction history.</p>
+            <p class="muted">Search, filter, drill down, edit, delete, and export your transaction history.</p>
           </div>
           <button id="newRecordBtn" class="secondary small">New</button>
         </div>
-        <div class="form-grid">
+        <div class="report-shortcut-list record-type-pill-list" aria-label="Record type filters">
+          ${typeOptions.map(type => `
+            <button type="button" class="report-shortcut record-type-pill ${filter.type === type ? 'active' : ''}" data-record-type-filter="${escapeAttr(type)}">
+              ${escapeHtml(type === 'Credit Card Payment' ? 'Card Payment' : type)}
+            </button>
+          `).join('')}
+        </div>
+        <div class="form-grid records-filter-grid">
           <div class="field">
             <label for="recordsMonth">Month</label>
-            ${monthSelectHtml('recordsMonth', state.recordFilter.month, true)}
+            ${monthSelectHtml('recordsMonth', filter.month, true)}
           </div>
           <div class="field">
-            <label for="recordsType">Type</label>
-            <select id="recordsType">
-              ${['All', ...TRANSACTION_TYPES.map(t => t.id)].map(v => `<option value="${escapeAttr(v)}" ${state.recordFilter.type === v ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}
+            <label for="recordsSubFilter">Sub filter</label>
+            <select id="recordsSubFilter" ${subOptions.length <= 1 ? 'disabled' : ''}>
+              ${subOptions.map(option => `<option value="${escapeAttr(option.value)}" ${filter.subfilter === option.value ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('')}
             </select>
           </div>
           <div class="field">
@@ -2339,14 +2398,15 @@
                 ['dateAsc', 'Date: oldest first'],
                 ['amountDesc', 'Amount: high to low'],
                 ['amountAsc', 'Amount: low to high']
-              ].map(([value, label]) => `<option value="${escapeAttr(value)}" ${state.recordFilter.sort === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
+              ].map(([value, label]) => `<option value="${escapeAttr(value)}" ${filter.sort === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
             </select>
           </div>
           <div class="field full">
             <label for="recordsSearch">Search</label>
-            <input id="recordsSearch" type="search" placeholder="Search notes, category, account, asset" value="${escapeAttr(state.recordFilter.search)}">
+            <input id="recordsSearch" type="search" placeholder="Search notes, category, account, asset" value="${escapeAttr(filter.search)}">
           </div>
         </div>
+        <p class="muted tiny">Showing ${records.length} matching ${records.length === 1 ? 'record' : 'records'}${filter.subfilter !== 'All' ? ` · ${escapeHtml(recordSubFilterDisplay(filter.subfilter))}` : ''}</p>
       </div>
       <div class="record-list">
         ${records.length ? records.map(recordCardHtml).join('') : empty('No matching records.')}
@@ -2381,12 +2441,17 @@
       state.editId = null;
       render();
     });
+    document.querySelectorAll('[data-record-type-filter]').forEach(button => button.addEventListener('click', () => {
+      state.recordFilter.type = button.dataset.recordTypeFilter || 'All';
+      state.recordFilter.subfilter = 'All';
+      render();
+    }));
     document.getElementById('recordsMonth')?.addEventListener('change', event => {
       state.recordFilter.month = event.target.value;
       render();
     });
-    document.getElementById('recordsType')?.addEventListener('change', event => {
-      state.recordFilter.type = event.target.value;
+    document.getElementById('recordsSubFilter')?.addEventListener('change', event => {
+      state.recordFilter.subfilter = event.target.value || 'All';
       render();
     });
     document.getElementById('recordsSort')?.addEventListener('change', event => {
@@ -2402,6 +2467,7 @@
         bindRecordActionButtons();
       }
     });
+    bindRecordActionButtons();
   }
 
   function bindRecordActionButtons() {
@@ -2874,6 +2940,19 @@
             ${averageExclusionCheckboxes()}
           </div>
         </div>
+        <div class="card">
+          <div class="card-title-row">
+            <div>
+              <h2>Backup / Import settings</h2>
+              <p class="muted">Open the Backup / Import panel from Setup, or download an Excel template for bulk updates.</p>
+            </div>
+          </div>
+          <div class="row">
+            <button id="openBackupImportFromSetupBtn" class="secondary" type="button">Open Backup / Import</button>
+            <button id="downloadImportTemplateBtn" class="secondary" type="button">Download import template</button>
+          </div>
+          <p class="muted tiny">The template includes import-ready Transactions, Accounts, Categories, and Investment_Assets sheets. Report sheets are not needed for import because reports are recalculated by the app.</p>
+        </div>
         <div class="card sticky-save-card">
           <button class="primary" type="submit">Save general settings</button>
           <span class="muted tiny">Save after editing go-live date, currency, or excluded months.</span>
@@ -3107,6 +3186,8 @@
     document.getElementById('syncNowBtn')?.addEventListener('click', () => syncNow({ forceAll: false }));
     document.getElementById('syncUploadAllBtn')?.addEventListener('click', () => uploadAllLocalData());
     document.getElementById('syncPullBtn')?.addEventListener('click', () => pullOnlyFromCloud());
+    document.getElementById('openBackupImportFromSetupBtn')?.addEventListener('click', () => document.getElementById('backupDialog').showModal());
+    document.getElementById('downloadImportTemplateBtn')?.addEventListener('click', exportImportTemplate);
 
     bindFdAutoCalc(document);
     const assetTypeSelect = document.getElementById('assetInvestmentType');
@@ -3509,12 +3590,132 @@
     `;
   }
 
+
+  function recordSubFilterOptions(type = 'All') {
+    const options = [{ value: 'All', label: type === 'All' ? 'All records' : `All ${type === 'Credit Card Payment' ? 'card payments' : type.toLowerCase()}` }];
+    if (type === 'Expense' || type === 'Income') {
+      const rows = state.data.categories
+        .filter(c => c.transactionType === type)
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+      rows.forEach(category => options.push({ value: `cat:${category.id}`, label: category.name || 'Uncategorized' }));
+      return options;
+    }
+    if (type === 'Investment') {
+      ['Mutual Funds', 'Stocks', 'Fixed Deposits', 'Other Investments'].forEach(investmentType => {
+        options.push({ value: `invType:${investmentType}`, label: investmentType });
+      });
+      return options;
+    }
+    if (type === 'Transfer') {
+      state.data.accounts
+        .filter(notDeleted)
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+        .forEach(account => options.push({ value: `account:${account.id}`, label: account.name || 'Unnamed account' }));
+      return options;
+    }
+    if (type === 'Credit Card Payment') {
+      state.data.accounts
+        .filter(account => account.accountType === 'Credit Card')
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+        .forEach(account => options.push({ value: `account:${account.id}`, label: account.name || 'Unnamed card' }));
+      return options;
+    }
+    return options;
+  }
+
+  function recordSubFilterDisplay(value = 'All') {
+    if (!value || value === 'All') return 'All records';
+    const [kind, ...rest] = String(value).split(':');
+    const id = rest.join(':');
+    if (kind === 'cat') return categoryById(id)?.name || 'Category filter';
+    if (kind === 'account') return accountById(id)?.name || 'Account filter';
+    if (kind === 'asset') return assetById(id)?.name || 'Asset filter';
+    if (kind === 'invType') return id || 'Investment type filter';
+    return value;
+  }
+
+  function recordMatchesSubFilter(t, filter = 'All') {
+    if (!filter || filter === 'All') return true;
+    const [kind, ...rest] = String(filter).split(':');
+    const id = rest.join(':');
+    if (kind === 'cat') return String(t.categoryId || '') === id;
+    if (kind === 'account') return String(t.fromAccountId || '') === id || String(t.toAccountId || '') === id;
+    if (kind === 'asset') return String(t.assetId || '') === id;
+    if (kind === 'invType') {
+      const asset = assetById(t.assetId);
+      const type = asset ? assetInvestmentType(asset) : normalizeInvestmentType(t.investmentType || categoryById(t.categoryId)?.name || '');
+      return type === id;
+    }
+    return true;
+  }
+
+  function setRecordsView(filters = {}) {
+    state.recordFilter = {
+      ...state.recordFilter,
+      month: filters.month ?? state.selectedMonth ?? currentMonthKey(),
+      type: filters.type ?? 'All',
+      subfilter: filters.subfilter ?? 'All',
+      search: filters.search ?? '',
+      sort: filters.sort ?? state.recordFilter.sort ?? 'dateDesc'
+    };
+    state.view = 'records';
+    render();
+  }
+
+  function reportRecordFilter(report, month) {
+    const baseMonth = month || state.selectedMonth || 'All';
+    const map = {
+      income: { type: 'Income' },
+      incomeTrend: { type: 'Income' },
+      expenses: { type: 'Expense' },
+      expenseTrend: { type: 'Expense' },
+      topExpenses: { type: 'Expense' },
+      budget: { type: 'Expense' },
+      investmentOverview: { type: 'Investment' },
+      investmentSplit: { type: 'Investment' },
+      mutualFunds: { type: 'Investment', subfilter: 'invType:Mutual Funds' },
+      stocks: { type: 'Investment', subfilter: 'invType:Stocks' },
+      fixedDeposits: { type: 'Investment', subfilter: 'invType:Fixed Deposits' },
+      otherInvestments: { type: 'Investment', subfilter: 'invType:Other Investments' },
+      maturityCalendar: { type: 'Investment' },
+      savings: { type: 'All' },
+      creditCards: { type: 'Expense' },
+      accountFlow: { type: 'All' },
+      cashflow: { type: 'All' },
+      monthlyMetadata: { type: 'All' },
+      dashboard: { type: 'All' },
+      openingBalances: { type: 'All' },
+      workbookSummary: { type: 'All' },
+      workbookMatrices: { type: 'All' },
+      all: { type: 'All' }
+    };
+    const picked = map[report] || { type: 'All' };
+    return { month: baseMonth, subfilter: 'All', ...picked };
+  }
+
+  function reportDrilldownCard(report, month) {
+    const filters = reportRecordFilter(report, month);
+    const label = filters.type === 'All'
+      ? 'View records for this period'
+      : `View ${filters.subfilter && filters.subfilter !== 'All' ? recordSubFilterDisplay(filters.subfilter) : filters.type} records`;
+    return `
+      <div class="card drilldown-card">
+        <div>
+          <h3>Drill down</h3>
+          <p class="muted tiny">Open the Records tab with the matching month/type filters already applied.</p>
+        </div>
+        <button type="button" class="secondary small" data-drill-records="1" data-drill-month="${escapeAttr(filters.month)}" data-drill-type="${escapeAttr(filters.type)}" data-drill-subfilter="${escapeAttr(filters.subfilter || 'All')}">${escapeHtml(label)}</button>
+      </div>
+    `;
+  }
+
   function filteredRecords() {
     const f = state.recordFilter;
     const term = String(f.search || '').trim().toLowerCase();
     const records = state.data.transactions.filter(t => {
       if (f.month !== 'All' && monthKey(t.date) !== f.month) return false;
       if (f.type !== 'All' && t.type !== f.type) return false;
+      if (!recordMatchesSubFilter(t, f.subfilter || 'All')) return false;
       if (!term) return true;
       const haystack = [
         t.type,
@@ -3522,7 +3723,9 @@
         categoryById(t.categoryId)?.name,
         accountById(t.fromAccountId)?.name,
         accountById(t.toAccountId)?.name,
-        assetById(t.assetId)?.name
+        assetById(t.assetId)?.name,
+        assetById(t.assetId) ? assetInvestmentType(assetById(t.assetId)) : t.investmentType,
+        recordSubFilterDisplay(f.subfilter || 'All')
       ].filter(Boolean).join(' ').toLowerCase();
       return haystack.includes(term);
     });
@@ -3967,6 +4170,45 @@
     toast('Excel workbook exported');
   }
 
+  async function exportImportTemplate() {
+    await loadAll();
+    const sheets = buildExcelImportTemplateSheets();
+    const blob = createXlsxBlob(sheets);
+    downloadBlob(`finance-tracker-import-template-${todayISO()}.xlsx`, blob);
+    toast('Import template downloaded');
+  }
+
+  function buildExcelImportTemplateSheets() {
+    const accountBalanceMap = new Map(accountBalances().map(row => [row.account.id, row.balance]));
+    const investmentMap = new Map(investmentRows().map(row => [row.asset.id, row]));
+    const transactionsHeader = ['Transaction_ID', 'Date', 'Month', 'Transaction_Type', 'Amount', 'Category_ID', 'Category', 'From_Account_ID', 'From_Account', 'To_Account_ID', 'To_Account', 'Investment_Type', 'Asset_ID', 'Investment_Asset', 'Maturity_Date', 'Notes', 'Created_At', 'Updated_At'];
+    const accountsHeader = ['Account_ID', 'Account_Name', 'Account_Type', 'Opening_Balance', 'Current_Balance', 'Active', 'Comments'];
+    const categoriesHeader = ['Category_ID', 'Category_Name', 'Transaction_Type', 'Include_In_Reports', 'Monthly_Budget', 'Active'];
+    const assetsHeader = ['Asset_ID', 'Asset_Name', 'Investment_Type', 'Opening_Amount', 'Manual_Current_Value', 'Maturity_Date', 'FD_Linked_Bank_ID', 'FD_Linked_Bank', 'FD_Account_Number', 'FD_Principal', 'FD_Maturity_Amount', 'FD_Interest_Amount', 'Total_Invested', 'Estimated_Current_Value', 'Gain_Loss', 'Active', 'Comments'];
+    const instructions = [
+      ['Offline Finance Tracker import template'],
+      ['How to use', 'Edit only Transactions, Accounts, Categories, and Investment_Assets. Keep the column headers unchanged. Then import this workbook from Backup / Import.'],
+      ['Transactions', 'Add new transactions here. Keep IDs blank for new rows, or preserve exported IDs when editing existing rows.'],
+      ['Accounts', 'Savings, Credit Card, Cash, and Company / reimbursement accounts. Current_Balance is for review only; import uses Opening_Balance.'],
+      ['Categories', 'Transaction_Type should be Income, Expense, or Investment. Include_In_Reports should be TRUE or FALSE.'],
+      ['Investment_Assets', 'Investment_Type should be Mutual Funds, Stocks, Fixed Deposits, or Other Investments. For FDs, fill Linked Bank / FD fields where available.'],
+      ['Important', 'Report sheets are not imported because reports are recalculated in the app. Use JSON backup for exact full backup/restore.']
+    ];
+    const accountRows = state.data.accounts.map(a => [a.id, a.name, a.accountType, num(a.openingBalance), num(accountBalanceMap.get(a.id)), isMasterInactive('account', a.id) ? 'FALSE' : 'TRUE', a.notes || '']);
+    const categoryRows = state.data.categories.map(c => [c.id, c.name, c.transactionType, c.includeInReports !== false ? 'TRUE' : 'FALSE', num(c.monthlyBudget), isMasterInactive('category', c.id) ? 'FALSE' : 'TRUE']);
+    const assetRows = state.data.assets.map(a => {
+      const row = investmentMap.get(a.id) || { invested: assetOpeningAmount(a), currentValue: num(a.currentValue), gainLoss: 0 };
+      return [a.id, a.name, assetInvestmentType(a), assetOpeningAmount(a), num(a.currentValue), a.maturityDate || '', a.fdBankAccountId || '', isFixedDepositAsset(a) ? fdBankName(a) : '', a.fdAccountNumber || '', fdPrincipalAmount(a), fdMaturityAmount(a), fdInterestAmount(a), row.invested, investmentDisplayValue(row), row.gainLoss || 0, isMasterInactive('asset', a.id) ? 'FALSE' : 'TRUE', a.notes || ''];
+    });
+    return [
+      { name: 'Instructions', rows: instructions },
+      { name: 'Transactions', rows: [transactionsHeader] },
+      { name: 'Accounts', rows: [accountsHeader, ...accountRows] },
+      { name: 'Categories', rows: [categoriesHeader, ...categoryRows] },
+      { name: 'Investment_Assets', rows: [assetsHeader, ...assetRows] }
+    ];
+  }
+
   function buildExcelExportSheets() {
     const months = knownMonths().sort();
     const accountBalanceMap = new Map(accountBalances().map(row => [row.account.id, row.balance]));
@@ -4368,7 +4610,8 @@
   function parseFinanceWorkbook(workbook) {
     const sheets = workbook.sheets;
     const appRows = objectsFromSheet(sheets.Transactions || sheets.transactions || []);
-    if (appRows.length) return parseAppExportWorkbook(sheets, appRows);
+    const hasAppImportSheets = Boolean(sheets.Transactions || sheets.transactions || sheets.Accounts || sheets.accounts || sheets.Categories || sheets.categories || sheets.Investment_Assets || sheets.investment_assets || sheets.Assets);
+    if (appRows.length || hasAppImportSheets) return parseAppExportWorkbook(sheets, appRows);
     const legacyRows = objectsFromSheet(sheets.Records || sheets.records || []);
     if (legacyRows.length) return parseLegacyRecordsWorkbook(sheets, legacyRows);
     const fallbackName = Object.keys(sheets).find(name => objectsFromSheet(sheets[name]).some(row => val(row, ['date']) && val(row, ['amount'])));
